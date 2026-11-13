@@ -30,6 +30,9 @@ keep_alive()
 MAIN_TOKEN = "9158679871:AAElNqk3kywd5Cmzf9XALgyrEA1sovF6HMg"
 main_bot = telebot.TeleBot(MAIN_TOKEN)
 
+bot.remove_webhook()
+
+
 running_threads = {}
 
 conn_main = sqlite3.connect("bot_maker.db", check_same_thread=False)
