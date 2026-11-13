@@ -32,6 +32,7 @@ def keep_alive():
 keep_alive()
 
 MAIN_TOKEN = "9158679871:AAE2EF-e7HP65tIiylBiDA9JcNR68gZj5BI"
+
 main_bot = telebot.TeleBot(MAIN_TOKEN)
 
 main_bot.remove_webhook()
