@@ -63,15 +63,16 @@ cursor_sub = cursor_main
     res = cursor_sub.fetchone()
     return res[0] if res else default
 
-  def set_setting(key, value):
+def set_setting(key, value):
     cursor_sub.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-        (key, value),
+        (key, value)
     )
     conn_sub.commit()
 
-  if not get_setting("welcome_msg", None):
-    set_setting("welcome_msg", "أهلاً بك. أرسل رسالتك وسنرد قريباً.")
+if not get_setting("welcome_msg", None):
+    set_setting("welcome_msg", "أهلاً بك. أرسل رسالتك وسنرد قريباً")
+    
   if not get_setting("reply_msg", None):
     set_setting("reply_msg", "✅ تم إرسال رسالتك بنجاح.")
   if not get_setting("show_identity", None):
