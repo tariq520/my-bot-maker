@@ -1,8 +1,9 @@
 
+import os
 import sqlite3
 import threading
-import telebot
 import time
+import telebot
 from telebot.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -11,63 +12,40 @@ from telebot.types import (
 )
 from flask import Flask, request
 import requests
-import os
 
+# 1. إعدادات البوت والتوكن في البداية تماماً
+MAIN_TOKEN = "9158679871:AAE2EF-e7HP65tIiylBiDA9JcNR68gZj5BI"
+main_bot = telebot.TeleBot(MAIN_TOKEN)
+app = Flask(__name__)
 
-
-app = Flask('')
+# 2. مسار الويب هوك الأساسي
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        main_bot.process_new_updates([update])
+        return "!", 200
+    return "OK", 200
 
 @app.route('/')
 def home():
-    return "I am alive!"
+    return "Bot Server is Alive!", 200
 
-def run():
-    app.run(host='0.0.0.0', port=8080)
-
-def keep_alive():
-    t = threading.Thread(target=run)
-    t.start()
-
-# شغّل السيرفر الوهمي قبل تشغيل البوت
-keep_alive()
-
-MAIN_TOKEN = "9158679871:AAE2EF-e7HP65tIiylBiDA9JcNR68gZj5BI"
-
-main_bot = telebot.TeleBot(MAIN_TOKEN)
-
+# إزالة الويب هوك القديم لتنظيف البداية
 main_bot.remove_webhook()
 
-
-
+# باقي كود قاعدة البيانات والجداول حقك يكمله هنا تحت:
 running_threads = {}
-
 conn_main = sqlite3.connect("bot_maker.db", check_same_thread=False)
 cursor_main = conn_main.cursor()
 cursor_main.execute(
-    "CREATE TABLE IF NOT EXISTS bots (token TEXT PRIMARY KEY, admin_id"
-    " INTEGER, bot_username TEXT)"
+    "CREATE TABLE IF NOT EXISTS bots (token TEXT PRIMARY KEY, admin_id INTEGER, bot_username TEXT)"
 )
 cursor_main.execute(
     "CREATE TABLE IF NOT EXISTS main_users (user_id INTEGER PRIMARY KEY)"
 )
-conn_main.commit()
 
-
-def run_sub_bot(token, admin_id):
-  sub_bot = telebot.TeleBot(token)
-
-  db_name = f"sub_bot_{admin_id}.db"
-  conn_sub = sqlite3.connect(db_name, check_same_thread=False)
-  cursor_sub = conn_sub.cursor()
-
-  cursor_sub.execute(
-      "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)"
-  )
-  cursor_sub.execute(
-      "CREATE TABLE IF NOT EXISTS banned (user_id INTEGER PRIMARY KEY)"
-  )
-  cursor_sub.execute(
-      "CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)"
   )
   conn_sub.commit()
 
