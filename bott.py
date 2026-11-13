@@ -455,9 +455,9 @@ RENDER_URL = "https://my-bot-maker-1.onrender.com"
 PORT = int(os.environ.get("PORT", 8080))
 
 main_bot.remove_webhook()
-main_bot.set_webhook(url=f"{RENDER_URL}/{MAIN_TOKEN}")
+main_bot.set_webhook(url=f"{RENDER_URL}/webhook")
 
-@app.route(f"/{MAIN_TOKEN}", methods=['POST'])
+@app.route('/webhook', methods=['POST'])
 def webhook():
     json_string = request.get_data().decode('utf-8')
     update = telebot.types.Update.de_json(json_string)
