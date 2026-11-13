@@ -56,9 +56,8 @@ cursor_main.execute("""
 conn_main.commit()
 conn_sub = conn_main
 cursor_sub = cursor_main
-        
-
-  def get_setting(key, default):
+         
+def get_setting(key, default):
     cursor_sub.execute("SELECT value FROM settings WHERE key = ?", (key,))
     res = cursor_sub.fetchone()
     return res[0] if res else default
