@@ -6,7 +6,26 @@ from telebot.types import (
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
+
 )
+from flask import Flask
+import threading
+
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "I am alive!"
+
+def run():
+    app.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    t = threading.Thread(target=run)
+    t.start()
+
+# شغّل السيرفر الوهمي قبل تشغيل البوت
+keep_alive()
 
 MAIN_TOKEN = "9158679871:AAElNqk3kywd5Cmzf9XALgyrEA1sovF6HMg"
 main_bot = telebot.TeleBot(MAIN_TOKEN)
