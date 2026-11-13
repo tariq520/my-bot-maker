@@ -13,7 +13,7 @@ from telebot.types import (
 from flask import Flask, request
 import requests
 
-# 1. إعدادات البوت والتوكن في البداية تماماً
+# 1. إعدادات البوت والتوكن
 MAIN_TOKEN = "9158679871:AAE2EF-e7HP65tIiylBiDA9JcNR68gZj5BI"
 main_bot = telebot.TeleBot(MAIN_TOKEN)
 app = Flask(__name__)
@@ -32,22 +32,31 @@ def webhook():
 def home():
     return "Bot Server is Alive!", 200
 
-# إزالة الويب هوك القديم لتنظيف البداية
+# تنظيف الويب هوك القديم
 main_bot.remove_webhook()
 
-# باقي كود قاعدة البيانات والجداول حقك يكمله هنا تحت:
+# 3. إعداد قاعدة البيانات والجداول بشكل سليم
 running_threads = {}
 conn_main = sqlite3.connect("bot_maker.db", check_same_thread=False)
 cursor_main = conn_main.cursor()
-cursor_main.execute(
-    "CREATE TABLE IF NOT EXISTS bots (token TEXT PRIMARY KEY, admin_id INTEGER, bot_username TEXT)"
-)
-cursor_main.execute(
-    "CREATE TABLE IF NOT EXISTS main_users (user_id INTEGER PRIMARY KEY)"
-)
 
-  )
-  conn_sub.commit()
+cursor_main.execute("""
+    CREATE TABLE IF NOT EXISTS bots (
+        token TEXT PRIMARY KEY, 
+        admin_id INTEGER, 
+        bot_username TEXT
+    )
+""")
+
+cursor_main.execute("""
+    CREATE TABLE IF NOT EXISTS main_users (
+        user_id INTEGER PRIMARY KEY
+    )
+""")
+conn_main.commit()
+conn_sub = conn_main
+cursor_sub = cursor_main
+        
 
   def get_setting(key, default):
     cursor_sub.execute("SELECT value FROM settings WHERE key = ?", (key,))
