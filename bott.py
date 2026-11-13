@@ -1,3 +1,4 @@
+
 import sqlite3
 import threading
 import telebot
@@ -7,7 +8,6 @@ from telebot.types import (
     InlineKeyboardMarkup,
     KeyboardButton,
     ReplyKeyboardMarkup,
-
 )
 from flask import Flask, request
 import requests
@@ -450,9 +450,6 @@ def process_new_token(message):
 
 restore_bots()
 
-print("...البوت الصانع يعمل الآن بكفاءة 🚀")
-main_bot.remove_webhook()
-
 RENDER_URL = "https://my-bot-maker-1.onrender.com"
 PORT = int(os.environ.get("PORT", 8080))
 
@@ -467,6 +464,6 @@ def webhook():
     return "!", 200
 
 if __name__ == "__main__":
-    print("...البوت الصانع يعمل بنظام الويب هوك بنجاح 🚀")
+    print("البوت الصانع يعمل بنظام الويب هوك بنجاح 🚀")
     app.run(host="0.0.0.0", port=PORT)
     
