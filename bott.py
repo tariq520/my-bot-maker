@@ -28,7 +28,7 @@ def keep_alive():
 # شغّل السيرفر الوهمي قبل تشغيل البوت
 keep_alive()
 
-MAIN_TOKEN = "9158679871:AAElNqk3kywd5Cmzf9XALgyrEA1sovF6HMg"
+MAIN_TOKEN = "9158679871:AAG26QRlNciygaqAgKF_8AelovrWAFBvzDA"
 main_bot = telebot.TeleBot(MAIN_TOKEN)
 
 main_bot.remove_webhook()
