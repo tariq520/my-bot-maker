@@ -9,7 +9,7 @@ from telebot.types import (
 
 )
 from flask import Flask
-import threading
+
 
 app = Flask('')
 
