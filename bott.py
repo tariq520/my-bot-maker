@@ -1,6 +1,7 @@
 import sqlite3
 import threading
 import telebot
+import time
 from telebot.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -448,6 +449,11 @@ restore_bots()
 
 print("...البوت الصانع يعمل الآن بكفاءة 🚀")
 main_bot.remove_webhook()
-main_bot.infinity_polling(none_stop=True, interval=0, timeout=20)
 
-main_bot.infinity_polling()
+while True:
+    try:
+        main_bot.infinity_polling(none_stop=True, interval=0, timeout=20, long_polling_timeout=20)
+    except Exception as e:
+        print(f"Error: {e}")
+        time.sleep(15)
+        
