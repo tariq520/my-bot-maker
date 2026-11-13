@@ -445,5 +445,9 @@ def process_new_token(message):
 
 
 restore_bots()
-print("🚀 البوت الصانع يعمل الآن بكفاءة...")
+
+print("...البوت الصانع يعمل الآن بكفاءة 🚀")
+main_bot.remove_webhook()
+main_bot.infinity_polling(none_stop=True, interval=0, timeout=20)
+
 main_bot.infinity_polling()
