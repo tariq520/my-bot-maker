@@ -30,7 +30,8 @@ keep_alive()
 MAIN_TOKEN = "9158679871:AAElNqk3kywd5Cmzf9XALgyrEA1sovF6HMg"
 main_bot = telebot.TeleBot(MAIN_TOKEN)
 
-bot.remove_webhook()
+main_bot.remove_webhook()
+
 
 
 running_threads = {}
