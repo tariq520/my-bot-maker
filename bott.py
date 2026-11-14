@@ -1,5 +1,10 @@
 import os
+import re
+import time
+import html
 import sqlite3
+import threading
+
 import telebot
 from telebot.types import (
     InlineKeyboardButton,
@@ -9,224 +14,332 @@ from telebot.types import (
 )
 from flask import Flask, request
 
+# ============================================================
+# الإعدادات
+# ============================================================
 MAIN_TOKEN = os.environ.get("MAIN_TOKEN")
-main_bot = telebot.TeleBot(MAIN_TOKEN)
+RENDER_URL = os.environ.get("RENDER_URL", "https://my-bot-maker-1.onrender.com").rstrip("/")
+PORT = int(os.environ.get("PORT", 8080))
+MY_ADMIN_ID = int(os.environ.get("MY_ADMIN_ID", "9050871827"))
+
+# مجلد حفظ قواعد البيانات. على Render اربط Disk على المسار /data
+# وضع DATA_DIR=/data في متغيرات البيئة حتى لا تضيع البيانات عند إعادة التشغيل.
+DATA_DIR = os.environ.get("DATA_DIR", ".")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+ALL_CONTENT = ["text", "photo", "video", "document", "voice", "sticker", "audio", "video_note", "animation"]
+
+main_bot = telebot.TeleBot(MAIN_TOKEN, threaded=False)
 app = Flask(__name__)
 
-RENDER_URL = "https://my-bot-maker-1.onrender.com"
-PORT = int(os.environ.get("PORT", 8080))
+
+# ============================================================
+# طبقة قاعدة بيانات آمنة مع تعدد الخيوط
+# ============================================================
+class DB:
+    def __init__(self, path):
+        self.conn = sqlite3.connect(path, check_same_thread=False)
+        self.lock = threading.Lock()
+
+    def run(self, sql, params=(), fetch=None):
+        """fetch: None / 'one' / 'all'"""
+        with self.lock:
+            cur = self.conn.execute(sql, params)
+            result = None
+            if fetch == "one":
+                result = cur.fetchone()
+            elif fetch == "all":
+                result = cur.fetchall()
+            self.conn.commit()
+            return result
+
+
+main_db = DB(os.path.join(DATA_DIR, "bot_maker.db"))
+main_db.run("CREATE TABLE IF NOT EXISTS bots (token TEXT PRIMARY KEY, admin_id INTEGER, bot_username TEXT)")
+main_db.run("CREATE TABLE IF NOT EXISTS main_users (user_id INTEGER PRIMARY KEY)")
+main_db.run("CREATE TABLE IF NOT EXISTS main_state (user_id INTEGER PRIMARY KEY, action TEXT)")
 
 sub_bots_cache = {}
+cache_lock = threading.Lock()
 
-# اتصال قاعدة البيانات الرئيسية مع السماح بتعدد الخيوط
-conn_main = sqlite3.connect("bot_maker.db", check_same_thread=False)
 
-with conn_main:
-    conn_main.execute("""
-        CREATE TABLE IF NOT EXISTS bots (
-            token TEXT PRIMARY KEY, 
-            admin_id INTEGER, 
-            bot_username TEXT
-        )
-    """)
-    conn_main.execute("""
-        CREATE TABLE IF NOT EXISTS main_users (
-            user_id INTEGER PRIMARY KEY
-        )
-    """)
-
-# إعداد معالجات الأحداث للبوت الفرعي
-def setup_sub_bot_handlers(sub_bot, admin_id, conn_sub):
-    def get_setting(key, default):
-        cur = conn_sub.cursor()
-        cur.execute("SELECT value FROM settings WHERE key = ?", (key,))
-        res = cur.fetchone()
-        return res[0] if res else default
+# ============================================================
+# البوتات الفرعية
+# ============================================================
+def setup_sub_bot_handlers(sub_bot, admin_id, db):
+    def get_setting(key, default=None):
+        row = db.run("SELECT value FROM settings WHERE key = ?", (key,), "one")
+        return row[0] if row else default
 
     def set_setting(key, value):
-        cur = conn_sub.cursor()
-        cur.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-            (key, value)
-        )
-        conn_sub.commit()
+        db.run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
 
-    if not get_setting("welcome_msg", None):
+    def get_state():
+        row = db.run("SELECT action FROM state WHERE user_id = ?", (admin_id,), "one")
+        return row[0] if row else None
+
+    def set_state(action):
+        db.run("INSERT OR REPLACE INTO state (user_id, action) VALUES (?, ?)", (admin_id, action))
+
+    def clear_state():
+        db.run("DELETE FROM state WHERE user_id = ?", (admin_id,))
+
+    # القيم الافتراضية
+    if get_setting("welcome_msg") is None:
         set_setting("welcome_msg", "أهلاً بك. أرسل رسالتك وسنرد قريباً")
-    if not get_setting("reply_msg", None):
+    if get_setting("reply_msg") is None:
         set_setting("reply_msg", "✅ تم إرسال رسالتك بنجاح.")
-    if not get_setting("show_identity", None):
+    if get_setting("show_identity") is None:
         set_setting("show_identity", "ON")
 
     def admin_panel_kb():
         kb = ReplyKeyboardMarkup(resize_keyboard=True)
-        status_id = "مفعل ✅" if get_setting("show_identity", "ON") == "ON" else "معطل ❌"
+        status = "مفعل ✅" if get_setting("show_identity", "ON") == "ON" else "معطل ❌"
         kb.add(KeyboardButton("⚙️ تغيير الترحيب"), KeyboardButton("📩 تغيير الاستلام"))
-        kb.add(KeyboardButton(f"👤 الهوية: {status_id}"))
+        kb.add(KeyboardButton(f"👤 الهوية: {status}"))
         kb.add(KeyboardButton("📢 إذاعة"), KeyboardButton("🚫 المحظورين"))
         kb.add(KeyboardButton("📊 الإحصائيات"))
         return kb
 
-    @sub_bot.message_handler(commands=["start"])
+    def is_admin_msg(m):
+        return m.from_user is not None and m.from_user.id == admin_id and m.chat.type == "private"
+
+    def is_user_msg(m):
+        return m.from_user is not None and m.from_user.id != admin_id and m.chat.type == "private"
+
+    ADMIN_BUTTONS = ["⚙️ تغيير الترحيب", "📩 تغيير الاستلام", "📢 إذاعة", "🚫 المحظورين", "📊 الإحصائيات"]
+
+    # ---------------- /start ----------------
+    @sub_bot.message_handler(commands=["start"], func=lambda m: m.chat.type == "private")
     def sub_start(message):
         user_id = message.from_user.id
-        cur = conn_sub.cursor()
         if user_id == admin_id:
+            clear_state()
             sub_bot.send_message(message.chat.id, "💎 أهلاً بك يا مالك البوت.", reply_markup=admin_panel_kb())
-        else:
-            cur.execute("SELECT * FROM banned WHERE user_id = ?", (user_id,))
-            if cur.fetchone():
-                sub_bot.reply_to(message, "❌ تم حظرك.")
-                return
-            cur.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
-            conn_sub.commit()
-            welcome_text = get_setting("welcome_msg", "أهلاً بك، أرسل رسالتك.")
-            sub_bot.reply_to(message, welcome_text)
-
-    @sub_bot.message_handler(
-        func=lambda m: m.chat.id == admin_id and m.text in [
-            "⚙️ تغيير الترحيب", "📩 تغيير الاستلام", "📢 إذاعة", "🚫 المحظورين", "📊 الإحصائيات"
-        ] or (m.chat.id == admin_id and "الهوية" in m.text)
-    )
-    def admin_controls(message):
-        cur = conn_sub.cursor()
-        if "تغيير الترحيب" in message.text:
-            msg = sub_bot.reply_to(message, "أرسل الترحيب الجديد:")
-            sub_bot.register_next_step_handler(msg, save_welcome)
-        elif "تغيير الاستلام" in message.text:
-            msg = sub_bot.reply_to(message, "أرسل رسالة الاستلام الجديدة:")
-            sub_bot.register_next_step_handler(msg, save_reply_msg)
-        elif "الهوية" in message.text:
-            current = get_setting("show_identity", "ON")
-            new_val = "OFF" if current == "ON" else "ON"
-            set_setting("show_identity", new_val)
-            sub_bot.reply_to(
-                message,
-                f"✅ الحالة: {'مفعل ✅' if new_val=='ON' else 'معطل ❌'}",
-                reply_markup=admin_panel_kb(),
-            )
-        elif "إذاعة" in message.text:
-            msg = sub_bot.reply_to(message, "📢 أرسل رسالة الإذاعة:")
-            sub_bot.register_next_step_handler(msg, process_broadcast)
-        elif "المحظورين" in message.text:
-            cur.execute("SELECT user_id FROM banned")
-            banned_users = cur.fetchall()
-            if not banned_users:
-                sub_bot.reply_to(message, "📂 قائمة المحظورين فارغة.")
-            else:
-                markup = InlineKeyboardMarkup()
-                for b in banned_users:
-                    markup.add(InlineKeyboardButton(f"🔓 رفع الحظر ({b[0]})", callback_data=f"unban_{b[0]}"))
-                sub_bot.reply_to(message, "🚫 قائمة المحظورين:", reply_markup=markup)
-        elif "الإحصائيات" in message.text:
-            cur.execute("SELECT COUNT(*) FROM users")
-            u_count = cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM banned")
-            b_count = cur.fetchone()[0]
-            sub_bot.reply_to(message, f"📊 الإحصائيات:\n\n👥 المشتركين: {u_count}\n🚫 المحظورين: {b_count}")
-
-    def save_welcome(message):
-        set_setting("welcome_msg", message.text)
-        sub_bot.reply_to(message, "✅ تم الحفظ.", reply_markup=admin_panel_kb())
-
-    def save_reply_msg(message):
-        set_setting("reply_msg", message.text)
-        sub_bot.reply_to(message, "✅ تم الحفظ.", reply_markup=admin_panel_kb())
-
-    def process_broadcast(message):
-        cur = conn_sub.cursor()
-        cur.execute("SELECT user_id FROM users")
-        users = cur.fetchall()
-        success, failed = 0, 0
-        status_msg = sub_bot.reply_to(message, "⏳ جاري الإذاعة...")
-        for u in users:
-            try:
-                sub_bot.copy_message(chat_id=u[0], from_chat_id=message.chat.id, message_id=message.message_id)
-                success += 1
-            except:
-                failed += 1
-        sub_bot.edit_message_text(
-            f"📢 تمت الإذاعة:\n\n✅ نجاح: {success}\n❌ فشل: {failed}",
-            chat_id=status_msg.chat.id,
-            message_id=status_msg.message_id,
-            reply_markup=admin_panel_kb(),
-        )
-
-    @sub_bot.message_handler(
-        func=lambda m: m.chat.id != admin_id,
-        content_types=["text", "photo", "video", "document", "voice", "sticker", "audio"],
-    )
-    def handle_user_msg(message):
-        user_id = message.from_user.id
-        cur = conn_sub.cursor()
-        cur.execute("SELECT * FROM banned WHERE user_id = ?", (user_id,))
-        if cur.fetchone():
             return
 
-        cur.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
-        conn_sub.commit()
+        if db.run("SELECT 1 FROM banned WHERE user_id = ?", (user_id,), "one"):
+            sub_bot.send_message(message.chat.id, "❌ تم حظرك.")
+            return
 
-        name = message.from_user.first_name
+        db.run("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+        sub_bot.send_message(message.chat.id, get_setting("welcome_msg", "أهلاً بك، أرسل رسالتك."))
+
+    # ---------------- أزرار لوحة المالك ----------------
+    @sub_bot.message_handler(
+        func=lambda m: is_admin_msg(m) and bool(m.text) and (m.text in ADMIN_BUTTONS or m.text.startswith("👤 الهوية"))
+    )
+    def admin_controls(message):
+        text = message.text
+        clear_state()
+
+        if "تغيير الترحيب" in text:
+            set_state("welcome")
+            sub_bot.send_message(message.chat.id, "أرسل الترحيب الجديد:")
+
+        elif "تغيير الاستلام" in text:
+            set_state("reply")
+            sub_bot.send_message(message.chat.id, "أرسل رسالة الاستلام الجديدة:")
+
+        elif "الهوية" in text:
+            new_val = "OFF" if get_setting("show_identity", "ON") == "ON" else "ON"
+            set_setting("show_identity", new_val)
+            sub_bot.send_message(
+                message.chat.id,
+                f"✅ الحالة: {'مفعل ✅' if new_val == 'ON' else 'معطل ❌'}",
+                reply_markup=admin_panel_kb(),
+            )
+
+        elif "إذاعة" in text:
+            set_state("broadcast")
+            sub_bot.send_message(message.chat.id, "📢 أرسل رسالة الإذاعة:")
+
+        elif "المحظورين" in text:
+            banned = db.run("SELECT user_id FROM banned", fetch="all")
+            if not banned:
+                sub_bot.send_message(message.chat.id, "📂 قائمة المحظورين فارغة.")
+            else:
+                markup = InlineKeyboardMarkup()
+                for b in banned:
+                    markup.add(InlineKeyboardButton(f"🔓 رفع الحظر ({b[0]})", callback_data=f"unban_{b[0]}"))
+                sub_bot.send_message(message.chat.id, "🚫 قائمة المحظورين:", reply_markup=markup)
+
+        elif "الإحصائيات" in text:
+            u_count = db.run("SELECT COUNT(*) FROM users", fetch="one")[0]
+            b_count = db.run("SELECT COUNT(*) FROM banned", fetch="one")[0]
+            sub_bot.send_message(message.chat.id, f"📊 الإحصائيات:\n\n👥 المشتركين: {u_count}\n🚫 المحظورين: {b_count}")
+
+    # ---------------- حالات الإدخال (محفوظة في القاعدة) ----------------
+    @sub_bot.message_handler(func=lambda m: is_admin_msg(m) and get_state() is not None, content_types=ALL_CONTENT)
+    def admin_state_handler(message):
+        action = get_state()
+
+        if action in ("welcome", "reply"):
+            if not message.text:
+                sub_bot.send_message(message.chat.id, "⚠️ أرسل نصاً فقط.")
+                return
+            set_setting("welcome_msg" if action == "welcome" else "reply_msg", message.text)
+            clear_state()
+            sub_bot.send_message(message.chat.id, "✅ تم الحفظ.", reply_markup=admin_panel_kb())
+
+        elif action == "broadcast":
+            clear_state()
+            users = db.run("SELECT user_id FROM users", fetch="all")
+            status_msg = sub_bot.send_message(message.chat.id, "⏳ جاري الإذاعة...")
+            success, failed = 0, 0
+            for u in users:
+                try:
+                    sub_bot.copy_message(u[0], message.chat.id, message.message_id)
+                    success += 1
+                except Exception:
+                    failed += 1
+                time.sleep(0.05)  # تجنب حدود تيليجرام
+            try:
+                sub_bot.edit_message_text(
+                    f"📢 تمت الإذاعة:\n\n✅ نجاح: {success}\n❌ فشل: {failed}",
+                    chat_id=status_msg.chat.id,
+                    message_id=status_msg.message_id,
+                )
+            except Exception:
+                pass
+            sub_bot.send_message(message.chat.id, "✅ انتهت الإذاعة.", reply_markup=admin_panel_kb())
+
+    # ---------------- رد المالك على المستخدم (Reply) ----------------
+    @sub_bot.message_handler(
+        func=lambda m: is_admin_msg(m) and m.reply_to_message is not None,
+        content_types=ALL_CONTENT,
+    )
+    def admin_reply(message):
+        row = db.run(
+            "SELECT user_id FROM forwarded WHERE msg_id = ?",
+            (message.reply_to_message.message_id,),
+            "one",
+        )
+        if not row:
+            sub_bot.send_message(message.chat.id, "⚠️ اعمل Reply على رسالة المستخدم (أو على الرسالة اللي فيها بياناته).")
+            return
+        try:
+            sub_bot.copy_message(row[0], message.chat.id, message.message_id)
+            sub_bot.send_message(message.chat.id, "✅ تم إرسال ردك.", reply_to_message_id=message.message_id)
+        except Exception as e:
+            sub_bot.send_message(message.chat.id, f"❌ تعذر الإرسال (ربما المستخدم حظر البوت):\n{e}")
+
+    # ---------------- رسائل المستخدمين ----------------
+    @sub_bot.message_handler(func=is_user_msg, content_types=ALL_CONTENT)
+    def handle_user_msg(message):
+        user_id = message.from_user.id
+        if db.run("SELECT 1 FROM banned WHERE user_id = ?", (user_id,), "one"):
+            return
+
+        db.run("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+
+        name = html.escape(message.from_user.first_name or "")
         username = f"@{message.from_user.username}" if message.from_user.username else "بدون"
-        show_id = get_setting("show_identity", "ON")
+        username = html.escape(username)
 
-        header = f"📩 رسالة:\n👤 {name}\n🔗 {username}\n🆔 `{user_id}`" if show_id == "ON" else f"📩 رسالة (هوية مخفية):\n🆔 `{user_id}`"
+        if get_setting("show_identity", "ON") == "ON":
+            header = f"📩 رسالة:\n👤 {name}\n🔗 {username}\n🆔 <code>{user_id}</code>"
+        else:
+            header = f"📩 رسالة (هوية مخفية):\n🆔 <code>{user_id}</code>"
 
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("🚫 حظر", callback_data=f"ban_{user_id}"))
 
-        sub_bot.send_message(admin_id, header, parse_mode="Markdown", reply_markup=markup)
-        sub_bot.copy_message(admin_id, message.chat.id, message.message_id)
-        sub_bot.reply_to(message, get_setting("reply_msg", "✅ تم الإرسال."))
+        try:
+            sent_header = sub_bot.send_message(admin_id, header, parse_mode="HTML", reply_markup=markup)
+            copied = sub_bot.copy_message(admin_id, message.chat.id, message.message_id)
+            # نحفظ الربط لنقدر نرد على المستخدم
+            db.run("INSERT OR REPLACE INTO forwarded (msg_id, user_id) VALUES (?, ?)", (sent_header.message_id, user_id))
+            db.run("INSERT OR REPLACE INTO forwarded (msg_id, user_id) VALUES (?, ?)", (copied.message_id, user_id))
+        except Exception as e:
+            print(f"[sub-bot] failed to deliver to admin: {e}")
+            return
 
+        sub_bot.send_message(message.chat.id, get_setting("reply_msg", "✅ تم الإرسال."), reply_to_message_id=message.message_id)
+
+    # ---------------- أزرار Inline ----------------
     @sub_bot.callback_query_handler(func=lambda call: True)
     def sub_callbacks(call):
-        data = call.data
-        cur = conn_sub.cursor()
-        if data.startswith("ban_"):
-            target_id = int(data.split("_")[1])
-            cur.execute("INSERT OR IGNORE INTO banned (user_id) VALUES (?)", (target_id,))
-            conn_sub.commit()
-            sub_bot.answer_callback_query(call.id, f"🚫 تم الحظر {target_id}", show_alert=True)
-            try:
-                sub_bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=None)
-            except:
-                pass
-        elif data.startswith("unban_"):
-            target_id = int(data.split("_")[1])
-            cur.execute("DELETE FROM banned WHERE user_id = ?", (target_id,))
-            conn_sub.commit()
-            sub_bot.answer_callback_query(call.id, f"✅ تم رفع الحظر {target_id}", show_alert=True)
-            try:
-                sub_bot.delete_message(chat_id=call.message.chat.id, message_id=call.message.message_id)
-            except:
-                pass
+        if call.from_user.id != admin_id:
+            sub_bot.answer_callback_query(call.id, "⚠️ غير مسموح.")
+            return
+
+        data = call.data or ""
+        try:
+            if data.startswith("ban_"):
+                target = int(data.split("_", 1)[1])
+                db.run("INSERT OR IGNORE INTO banned (user_id) VALUES (?)", (target,))
+                sub_bot.answer_callback_query(call.id, f"🚫 تم الحظر {target}", show_alert=True)
+                try:
+                    sub_bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+                except Exception:
+                    pass
+
+            elif data.startswith("unban_"):
+                target = int(data.split("_", 1)[1])
+                db.run("DELETE FROM banned WHERE user_id = ?", (target,))
+                sub_bot.answer_callback_query(call.id, f"✅ تم رفع الحظر {target}", show_alert=True)
+                try:
+                    sub_bot.delete_message(call.message.chat.id, call.message.message_id)
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[sub-bot] callback error: {e}")
+
 
 def get_or_create_sub_bot(token, admin_id):
-    if token in sub_bots_cache:
-        return sub_bots_cache[token]
-    
-    sub_bot = telebot.TeleBot(token)
-    conn_sub = sqlite3.connect("bot_maker.db", check_same_thread=False)
-    with conn_sub:
-        conn_sub.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT, value TEXT)")
-        conn_sub.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)")
-        conn_sub.execute("CREATE TABLE IF NOT EXISTS banned (user_id INTEGER PRIMARY KEY)")
+    with cache_lock:
+        if token in sub_bots_cache:
+            return sub_bots_cache[token]
 
-    setup_sub_bot_handlers(sub_bot, admin_id, conn_sub)
-    sub_bots_cache[token] = sub_bot
-    return sub_bot
+        sub_bot = telebot.TeleBot(token, threaded=False)
+
+        # قاعدة بيانات مستقلة لكل بوت
+        bot_id = token.split(":")[0]
+        db = DB(os.path.join(DATA_DIR, f"sub_{bot_id}.db"))
+        db.run("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+        db.run("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)")
+        db.run("CREATE TABLE IF NOT EXISTS banned (user_id INTEGER PRIMARY KEY)")
+        db.run("CREATE TABLE IF NOT EXISTS state (user_id INTEGER PRIMARY KEY, action TEXT)")
+        db.run("CREATE TABLE IF NOT EXISTS forwarded (msg_id INTEGER PRIMARY KEY, user_id INTEGER)")
+
+        setup_sub_bot_handlers(sub_bot, admin_id, db)
+        sub_bots_cache[token] = sub_bot
+        return sub_bot
+
+
+def set_sub_webhook(token, admin_id):
+    sub_bot = get_or_create_sub_bot(token, admin_id)
+    sub_bot.remove_webhook()
+    sub_bot.set_webhook(url=f"{RENDER_URL}/webhook/{token}")
+
 
 def restore_all_sub_bots():
-    cur = conn_main.cursor()
-    cur.execute("SELECT token, admin_id FROM bots")
-    for token, admin_id in cur.fetchall():
+    rows = main_db.run("SELECT token, admin_id FROM bots", fetch="all")
+    for token, admin_id in rows:
         try:
-            sub_bot = get_or_create_sub_bot(token, admin_id)
-            sub_bot.remove_webhook()
-            sub_bot.set_webhook(url=f"{RENDER_URL}/webhook/{token}")
+            set_sub_webhook(token, admin_id)
+            print(f"[restore] webhook OK for bot {token.split(':')[0]}")
         except Exception as e:
-            print(f"Error setting webhook for {token}: {e}")
+            print(f"[restore] error for bot {token.split(':')[0]}: {e}")
+        time.sleep(0.2)
+
+
+# ============================================================
+# البوت الرئيسي (الصانع)
+# ============================================================
+def main_state_get(user_id):
+    row = main_db.run("SELECT action FROM main_state WHERE user_id = ?", (user_id,), "one")
+    return row[0] if row else None
+
+
+def main_state_set(user_id, action):
+    main_db.run("INSERT OR REPLACE INTO main_state (user_id, action) VALUES (?, ?)", (user_id, action))
+
+
+def main_state_clear(user_id):
+    main_db.run("DELETE FROM main_state WHERE user_id = ?", (user_id,))
+
 
 def get_main_keyboard(is_admin=False):
     kb = ReplyKeyboardMarkup(resize_keyboard=True)
@@ -235,53 +348,77 @@ def get_main_keyboard(is_admin=False):
         kb.add(KeyboardButton("📢 إذاعة عامة"))
     return kb
 
-MY_ADMIN_ID = 9050871827
 
 @main_bot.message_handler(commands=["start"])
 def main_start(message):
-    cur = conn_main.cursor()
-    cur.execute("INSERT OR IGNORE INTO main_users (user_id) VALUES (?)", (message.from_user.id,))
-    conn_main.commit()
+    main_state_clear(message.from_user.id)
+    main_db.run("INSERT OR IGNORE INTO main_users (user_id) VALUES (?)", (message.from_user.id,))
     is_adm = message.from_user.id == MY_ADMIN_ID
     main_bot.send_message(message.chat.id, "أهلاً بك في صانع البوتات 🛠️", reply_markup=get_main_keyboard(is_adm))
 
+
 @main_bot.message_handler(func=lambda m: m.text in ["➕ صنع بوت جديد", "📋 بوتاتك", "📢 إذاعة عامة"])
 def main_menu_handler(message):
-    cur = conn_main.cursor()
+    uid = message.from_user.id
+    main_state_clear(uid)
+
     if message.text == "➕ صنع بوت جديد":
-        msg = main_bot.reply_to(message, "أرسل توكن البوت من @BotFather:")
-        main_bot.register_next_step_handler(msg, process_new_token)
+        main_state_set(uid, "new_token")
+        main_bot.send_message(message.chat.id, "أرسل توكن البوت من @BotFather:")
+
     elif message.text == "📋 بوتاتك":
-        cur.execute("SELECT bot_username FROM bots WHERE admin_id = ?", (message.from_user.id,))
-        bots = cur.fetchall()
+        bots = main_db.run("SELECT bot_username FROM bots WHERE admin_id = ?", (uid,), "all")
         if not bots:
-            main_bot.reply_to(message, "⚠️ ليس لديك بوتات.")
+            main_bot.send_message(message.chat.id, "⚠️ ليس لديك بوتات.")
         else:
-            main_bot.reply_to(message, "📋 بوتاتك:\n\n" + "\n".join([f"🤖 @{b[0]}" for b in bots]))
+            main_bot.send_message(message.chat.id, "📋 بوتاتك:\n\n" + "\n".join(f"🤖 @{b[0]}" for b in bots))
+
     elif message.text == "📢 إذاعة عامة":
-        if message.from_user.id == MY_ADMIN_ID:
-            msg = main_bot.reply_to(message, "📢 أرسل الإذاعة العامة (روابط، أخبار، إعلانات):")
-            main_bot.register_next_step_handler(msg, process_main_broadcast)
+        if uid == MY_ADMIN_ID:
+            main_state_set(uid, "main_broadcast")
+            main_bot.send_message(message.chat.id, "📢 أرسل الإذاعة العامة (روابط، أخبار، إعلانات):")
         else:
-            main_bot.reply_to(message, "⚠️ هذا الأمر مخصص للمطور فقط.")
+            main_bot.send_message(message.chat.id, "⚠️ هذا الأمر مخصص للمطور فقط.")
+
+
+@main_bot.message_handler(
+    func=lambda m: main_state_get(m.from_user.id) is not None,
+    content_types=ALL_CONTENT,
+)
+def main_state_handler(message):
+    uid = message.from_user.id
+    action = main_state_get(uid)
+
+    if action == "new_token":
+        if not message.text:
+            main_bot.send_message(message.chat.id, "⚠️ أرسل التوكن كنص.")
+            return
+        main_state_clear(uid)
+        process_new_token(message)
+
+    elif action == "main_broadcast":
+        main_state_clear(uid)
+        if uid == MY_ADMIN_ID:
+            process_main_broadcast(message)
+
 
 def process_main_broadcast(message):
-    cur = conn_main.cursor()
-    cur.execute("SELECT user_id FROM main_users")
-    users = cur.fetchall()
+    users = main_db.run("SELECT user_id FROM main_users", fetch="all")
+    status_msg = main_bot.send_message(message.chat.id, "⏳ جاري إرسال الإذاعة العامة...")
     success, failed = 0, 0
-    status_msg = main_bot.reply_to(message, "⏳ جاري إرسال الإذاعة العامة...")
     for u in users:
         try:
-            main_bot.copy_message(chat_id=u[0], from_chat_id=message.chat.id, message_id=message.message_id)
+            main_bot.copy_message(u[0], message.chat.id, message.message_id)
             success += 1
-        except:
+        except Exception:
             failed += 1
+        time.sleep(0.05)
     main_bot.edit_message_text(
-        f"📢 تمت الإذاعة العامة بنجاح:\n\n✅ نجاح: {success}\n❌ فشل: {failed}",
+        f"📢 تمت الإذاعة العامة:\n\n✅ نجاح: {success}\n❌ فشل: {failed}",
         chat_id=status_msg.chat.id,
         message_id=status_msg.message_id,
     )
+
 
 @main_bot.callback_query_handler(func=lambda call: True)
 def main_callbacks(call):
@@ -290,75 +427,73 @@ def main_callbacks(call):
     elif call.data == "what_token":
         main_bot.answer_callback_query(call.id, "التوكن هو الرقم السري للبوت.", show_alert=True)
 
+
+TOKEN_RE = re.compile(r"^\d{6,}:[A-Za-z0-9_-]{30,}$")
+
+
 def process_new_token(message):
     token = message.text.strip()
     admin_id = message.from_user.id
-    cur = conn_main.cursor()
 
-    cur.execute("SELECT * FROM bots WHERE token = ?", (token,))
-    if cur.fetchone():
-        main_bot.reply_to(message, "⚠️ هذا البوت مسجل مسبقاً!")
+    if not TOKEN_RE.match(token):
+        main_bot.send_message(message.chat.id, "❌ صيغة التوكن غير صحيحة. انسخه من @BotFather كما هو.")
         return
 
-    msg_wait = main_bot.reply_to(message, "⏳ جاري تفعيل البوت بالويب هوك السريع...")
-    try:
-        temp_bot = telebot.TeleBot(token)
-        bot_username = temp_bot.get_me().username
-        cur.execute("INSERT INTO bots (token, admin_id, bot_username) VALUES (?, ?, ?)", (token, admin_id, bot_username))
-        conn_main.commit()
+    if token == MAIN_TOKEN:
+        main_bot.send_message(message.chat.id, "⚠️ لا يمكن استخدام توكن البوت الصانع.")
+        return
 
-        sub_bot = get_or_create_sub_bot(token, admin_id)
-        sub_bot.remove_webhook()
-        sub_bot.set_webhook(url=f"{RENDER_URL}/webhook/{token}")
+    if main_db.run("SELECT 1 FROM bots WHERE token = ?", (token,), "one"):
+        main_bot.send_message(message.chat.id, "⚠️ هذا البوت مسجل مسبقاً!")
+        return
+
+    msg_wait = main_bot.send_message(message.chat.id, "⏳ جاري تفعيل البوت...")
+    try:
+        bot_username = telebot.TeleBot(token).get_me().username
+        main_db.run("INSERT INTO bots (token, admin_id, bot_username) VALUES (?, ?, ?)", (token, admin_id, bot_username))
+
+        try:
+            set_sub_webhook(token, admin_id)
+        except Exception:
+            # فشل الويب هوك: نحذف التسجيل حتى لا يبقى بوت ميت
+            main_db.run("DELETE FROM bots WHERE token = ?", (token,))
+            with cache_lock:
+                sub_bots_cache.pop(token, None)
+            raise
 
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton("🚀 افتح البوت", url=f"https://t.me/{bot_username}"))
         main_bot.edit_message_text(
-            f"🎉 تم تفعيل البوت بنجاح وبدون تعليق!\n\n🤖 @{bot_username}",
+            f"🎉 تم تفعيل البوت بنجاح!\n\n🤖 @{bot_username}\n\nأرسل له /start لتظهر لك لوحة التحكم.",
             chat_id=msg_wait.chat.id,
             message_id=msg_wait.message_id,
             reply_markup=markup,
         )
     except Exception as e:
         main_bot.edit_message_text(
-            f"❌ خطأ في التوكن:\n{e}",
+            f"❌ خطأ:\n{e}",
             chat_id=msg_wait.chat.id,
             message_id=msg_wait.message_id,
         )
 
-@app.route('/webhook', methods=['POST'])
+
+# ============================================================
+# مسارات Flask
+# ============================================================
+@app.route("/webhook", methods=["POST"])
 def webhook():
-    json_string = request.get_data().decode('utf-8')
-    update = telebot.types.Update.de_json(json_string)
-    main_bot.process_new_updates([update])
+    update = telebot.types.Update.de_json(request.get_data().decode("utf-8"))
+    try:
+        main_bot.process_new_updates([update])
+    except Exception as e:
+        print(f"[main webhook] error: {e}")
     return "!", 200
 
-@app.route('/webhook/<token>', methods=['POST'])
+
+@app.route("/webhook/<token>", methods=["POST"])
 def sub_webhook(token):
-    cur = conn_main.cursor()
-    cur.execute("SELECT admin_id FROM bots WHERE token = ?", (token,))
-    res = cur.fetchone()
-    if not res:
+    row = main_db.run("SELECT admin_id FROM bots WHERE token = ?", (token,), "one")
+    if not row:
         return "Bot not found", 404
-    
-    admin_id = res[0]
-    sub_bot = get_or_create_sub_bot(token, admin_id)
-    
-    json_string = request.get_data().decode('utf-8')
-    update = telebot.types.Update.de_json(json_string)
-    sub_bot.process_new_updates([update])
-    return "!", 200
 
-@app.route('/')
-def home():
-    restore_all_sub_bots()
-    return "Bot Maker Server is Live and All Webhooks Active!", 200
-
-restore_all_sub_bots()
-main_bot.remove_webhook()
-main_bot.set_webhook(url=f"{RENDER_URL}/webhook")
-
-if __name__ == "__main__":
-    print("البوت الصانع وبوتات المستخدمين تعمل بنظام الويب هوك الفوري 🚀")
-    app.run(host="0.0.0.0", port=PORT)
-        
+    sub_bot = get_or_create_sub_bo
