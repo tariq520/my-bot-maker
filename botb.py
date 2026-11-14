@@ -1,4 +1,6 @@
 import os
+from threading import Thread
+from flask import Flask
 import telebot
 from telebot.types import (
     InlineKeyboardButton,
@@ -10,11 +12,29 @@ import sqlite3
 import html
 import time
 
+# ==================== سيرفر وهمي لفتح البورت لـ Render ====================
+app = Flask(__name__)
+
+
+@app.route("/")
+def home():
+    return "Bot is active and running successfully! 🚀"
+
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+
+# تشغيل السيرفر الوهمي في الخلفية
+Thread(target=run_flask).daemon = True
+Thread.start()
+# ========================================================================
+
 # ==================== جلب البيانات من Environment Variables ====================
 TOKEN = os.environ.get("TOKEN")
 ADMIN_ID_STR = os.environ.get("ADMIN_ID")
 
-# فحص سريع للتأكد من إدخال المتغيرات في رندر
 if not TOKEN or not ADMIN_ID_STR:
     print(
         "❌ خطأ: يرجى إضافة TOKEN و ADMIN_ID في متغيرات البيئة (Environment Variables) على موقع Render!"
