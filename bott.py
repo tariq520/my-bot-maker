@@ -440,6 +440,7 @@ def process_new_token(message):
         )
 
 
+# التأكد من استرجاع وتشغيل كل البوتات فور إقلاع السيرفر
 restore_bots()
 
 RENDER_URL = "https://my-bot-maker-1.onrender.com"
@@ -457,7 +458,9 @@ def webhook():
 
 @app.route('/')
 def home():
-    return "Bot Server is Alive!", 200
+    # 🔥 حركة ذكية: كل ما يزور السيرفر نتاكد أن البوتات الفرعية شغالّة وما تنام
+    restore_bots()
+    return "Bot Server is Alive and Bots Restored!", 200
 
 if __name__ == "__main__":
     print("البوت الصانع يعمل بنظام الويب هوك بنجاح 🚀")
