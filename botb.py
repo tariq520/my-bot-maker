@@ -26,9 +26,10 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 
 
-# تشغيل السيرفر الوهمي في الخلفية
-Thread(target=run_flask).daemon = True
-Thread.start()
+# تشغيل السيرفر الوهمي في الخلفية بالطريقة الصحيحة
+flask_thread = Thread(target=run_flask)
+flask_thread.daemon = True
+flask_thread.start()
 # ========================================================================
 
 # ==================== جلب البيانات من Environment Variables ====================
@@ -262,7 +263,7 @@ def handle_admin_states(message):
     elif state == "broadcast":
         clear_state(user_id)
         users = cursor.execute("SELECT user_id FROM users").fetchall()
-        status_msg = bot.send_message(message.chat.id, "⏳ جاري بدء الإذاعة...")
+        bot.send_message(message.chat.id, "⏳ جاري بدء الإذاعة...")
         success, failed = 0, 0
         for u in users:
             try:
