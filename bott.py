@@ -13,7 +13,8 @@ from flask import Flask, request
 import requests
 
 # 1. إعدادات البوت الرئيسي والتوكن
-MAIN_TOKEN = "9158679871:AAE2EF-e7HP65tIiylBiDA9JcNR68gZj5BI"
+MAIN_TOKEN = os.environ.get("MAIN_TOKEN")
+
 main_bot = telebot.TeleBot(MAIN_TOKEN)
 app = Flask(__name__)
 
